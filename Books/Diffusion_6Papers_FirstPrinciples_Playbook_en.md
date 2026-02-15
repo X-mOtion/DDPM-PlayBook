@@ -1,7 +1,7 @@
 # Diffusion model construction and parameter adjustment Playbook (strictly based on 6 papers)
 
 Document Type: Structured Technology Review and Practice Manual (Journal Available Version)
-Editor: Jing Beibei
+Editor: Beibei Jing  
 Version: 2026-02-14
 Scope: Only summarize and connect the design choices and experiences appearing in the following 6 papers; no additional parameter adjustment conclusions outside the papers will be introduced.
 Writing Constraints: Strictly 4 paragraphs per entry: `How / Why / Common Issues / Fix`.
