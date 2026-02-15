@@ -41,6 +41,10 @@ EN_LABEL_ALIASES = (
     ("Fix", "Solution"),
 )
 
+# Table fonts are resolved at runtime in `build_pdf`.
+TABLE_CELL_FONT = "Helvetica"
+TABLE_HEADER_FONT = "Helvetica-Bold"
+
 
 @dataclass
 class Item:
@@ -480,14 +484,14 @@ def _parse_md_table_block(
     cell_style = ParagraphStyle(
         "PBTableCell",
         parent=getSampleStyleSheet()["BodyText"],
-        fontName="LXGWWenKai-Regular",
+        fontName=TABLE_CELL_FONT,
         fontSize=7.6,
         leading=9.2,
     )
     header_style = ParagraphStyle(
         "PBTableHeader",
         parent=cell_style,
-        fontName="LXGWWenKai-Medium",
+        fontName=TABLE_HEADER_FONT,
     )
 
     def p(txt: str, is_header: bool = False) -> Paragraph:
@@ -610,6 +614,16 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
         body_font_boldish = fallback_cid
         title_font = fallback_cid
         running_font = fallback_cid
+
+    # Resolve fonts for markdown pipe tables. Use a family name for TT fonts
+    # so Paragraph parser can map bold/italic safely via addMapping().
+    global TABLE_CELL_FONT, TABLE_HEADER_FONT
+    if running_font == fallback_cid:
+        TABLE_CELL_FONT = fallback_cid
+        TABLE_HEADER_FONT = fallback_cid
+    else:
+        TABLE_CELL_FONT = "LXGWWenKai"
+        TABLE_HEADER_FONT = "LXGWWenKai"
 
     with open(input_md, "r", encoding="utf-8") as f:
         md = f.read()
@@ -774,7 +788,7 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
 
             label_col_w = 26 * mm
             detail_col_w = doc.width - label_col_w
-            rows = []
+            item_sections: List[Tuple[str, str]] = []
             for idx, label in enumerate(section_labels):
                 value = ""
                 if is_english_doc:
@@ -791,37 +805,59 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
                             if it.fields.get(alias):
                                 value = it.fields.get(alias, "").strip()
                                 break
-                rows.append(
-                    [
-                        Paragraph(label, ParagraphStyle("PBLabel", parent=small, fontSize=9.5, leading=12, textColor=colors.HexColor("#0B3D2E"))),
-                        render_cell_flowables(value, base, max_table_w=detail_col_w - 14)
-                        if value
-                        else [Paragraph(" ", base)],
-                    ]
-                )
+                item_sections.append((label, value))
 
-            table = Table(
-                rows,
-                colWidths=[label_col_w, detail_col_w],
-                hAlign="LEFT",
+            # ReportLab cannot split a single table row across pages; switch to
+            # stacked section layout for long content blocks to avoid LayoutError.
+            long_content = any(len(v) > 1200 for _, v in item_sections)
+            label_style = ParagraphStyle(
+                "PBLabel",
+                parent=small,
+                fontSize=9.5,
+                leading=12,
+                textColor=colors.HexColor("#0B3D2E"),
             )
-            table.setStyle(
-                TableStyle(
-                    [
-                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                        ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E0E0E0")),
-                        ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#C6C6C6")),
-                        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F3F7F5")),
-                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                        ("TOPPADDING", (0, 0), (-1, -1), 5),
-                        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                    ]
+            if long_content:
+                for label, value in item_sections:
+                    block.append(Paragraph(label, label_style))
+                    if value:
+                        block.extend(render_cell_flowables(value, base, max_table_w=doc.width - 8))
+                    else:
+                        block.append(Paragraph(" ", base))
+                    block.append(Spacer(1, 1.8 * mm))
+            else:
+                rows = []
+                for label, value in item_sections:
+                    rows.append(
+                        [
+                            Paragraph(label, label_style),
+                            render_cell_flowables(value, base, max_table_w=detail_col_w - 14)
+                            if value
+                            else [Paragraph(" ", base)],
+                        ]
+                    )
+                table = Table(
+                    rows,
+                    colWidths=[label_col_w, detail_col_w],
+                    hAlign="LEFT",
                 )
-            )
-            block.append(table)
+                table.setStyle(
+                    TableStyle(
+                        [
+                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E0E0E0")),
+                            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#C6C6C6")),
+                            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F3F7F5")),
+                            ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                            ("TOPPADDING", (0, 0), (-1, -1), 5),
+                            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                        ]
+                    )
+                )
+                block.append(table)
             block.append(Spacer(1, 5 * mm))
-            story.append(KeepTogether(block))
+            story.extend(block)
 
     os.makedirs(os.path.dirname(output_pdf), exist_ok=True)
     # TableOfContents needs a multi-pass build to resolve page numbers.

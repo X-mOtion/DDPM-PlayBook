@@ -813,33 +813,36 @@ Citation format: Write `Ref: [P? p?]` in the title of each entry.
 
 ### A.0 "Indicator → Model" decision-making process for three types of data sets (image/video/SMPL-H) Citation: P4 p37; P1 p11; P3 p45; P5 p17; P6 p3
 
-- How to do it: Use the same template for the three types of data sets: first count the indicators, and then select the backbone and scale level according to the rules.
-  1) Image data set (text condition) must count:
-     - Scale: Number of samples `N`, resolution distribution, long-tail category/scenario coverage.
-     - Quality: Bad sample rate, repeat/near repeat rate, compression noise/watermark ratio.
-     - Alignment: Text-image matching score distribution and proportion of low-scoring samples.
-     - Decision rules: Small-scale or high-noise priority U-Net route (P1/P3); large-scale and high-quality can enter the DiT/Transformer route (P5).
-  2) Video data set (text condition) must count:
-     - Scale: number of videos, total duration, resolution/FPS/duration distribution.
-     - Quality: Bad clip rate, compression noise, duplicate clip rate, shot segmentation anomaly ratio.
-     - Space-time complexity: motion intensity, lens switching frequency, long-term dependence ratio (proportion of long videos).
-     - Alignment: Text-video matching score distribution and temporal semantic mismatch ratio.
-     - Decision rules: Use Video U-Net/latent video diffusion for small scale or high noise; use Video DiT/spatial-temporal Transformer for large scale, high quality and complex motion.
-  3) SMPL-H sequence data set (text condition) must count:
-     - Scale: number of sequences, total number of frames, sequence length distribution.
-     - Quality: parameter missing rate, out-of-bounds rate, reconstruction failure rate (non-renderable/abnormal posture).
-     - Dynamic complexity: joint velocity/acceleration distribution, high-frequency hand action ratio, long-range action dependence ratio.
-     - Alignment: text-action matching score distribution, action semantic mismatch ratio.
-     - Decision rules: If the data size is limited or the noise is high, 1D U-Net/parameter diffusion is preferred; for larger scale and complex action semantics, sequence Transformer diffusion can be used.
-  4) Unified selection threshold for three types of data:
-     - Merely counting "scale + quality" is not enough for selection. "Complexity (space-time/dynamics)" and "text alignment" must also be added.
-     - When comparing the backbone, freeze the sampler/NFE/sample size/random seed, and only change the backbone and discrete scale gears (see 5.5-5.6).
-     - First compare the minimum two levels to confirm the trend, and then expand the scale to scan points (P1/P5).
-- Why do this: Data size and quality determine whether the model is trainable, complexity determines the required modeling capabilities, and text alignment determines the upper limit of conditional learning; missing any of the four will lead to "wrong model selection but non-attributable". This process puts the three types of data sets under the same reviewable framework and aligns them with the reproducible evaluation protocol in the diffusion paper (P1/P3/P4/P5/P6).
-- Common problems: Use large models only based on scale and quality; ignore spatiotemporal complexity for video tasks; ignore parameter validity for SMPL-H tasks; ignore text alignment noise for conditional tasks, resulting in unstable training and untrustworthy conclusions.
+- How to do it: Use a 5-step pipeline to map data indicators to model size (engineering rule, not a hard threshold from papers).
+  1) Collect four indicator groups (shared by image/video/SMPL-H):
+     - Scale: `N_eff` (deduplicated effective sample count).
+     - Quality: `bad_rate`, `dup_rate`, `align_err`.
+     - Complexity: image diversity, video motion/long-range dependency, SMPL-H dynamics/hand details.
+     - Alignment: all text-conditioned tasks must report `align_err`.
+  2) Compute scores and gate:
+     - `S_N = clip((log10(N_eff)-4)/2, 0, 1)`
+     - `S_Q = 1 - clip((bad_rate + dup_rate + align_err)/0.45, 0, 1)`
+     - `S_C` by modality: image=normalized diversity; video=`0.5*motion + 0.5*long_range`; SMPL-H=`0.5*dyn + 0.5*hand_detail`
+     - usability gate `G`: if `dup_rate>0.20` or `align_err>0.12` or `bad_rate>0.10`, set `G=0`; else `G=1`
+     - `S = 0.35*S_N + 0.35*S_Q + 0.30*S_C`
+  3) Choose image-base parameter tier `P_base`:
+     - `S < 0.40` -> small `15M~35M`
+     - `0.40 <= S < 0.70` -> medium `35M~80M`
+     - `S >= 0.70` -> large `80M~160M`
+  4) Apply modality coefficient to get `P_target`:
+     - image: `k=1.0`, `P_target=P_base`
+     - video: `k=2.5`, `P_target=2.5*P_base`
+     - SMPL-H: `k=0.6`, `P_target=0.6*P_base`
+  5) Map to your current 32x32 U-Net options:
+     - small: `--unet-chs 64,128,128,128 --unet-num-blocks 2 --unet-no-attn`
+     - medium: `--unet-chs 128,256,256,256 --unet-num-blocks 2 --unet-use-attn`
+     - large: `--unet-chs 128,256,384,512 --unet-num-blocks 3 --unet-use-attn`
+- Why do this: scale, quality, complexity, and alignment constrain different failure modes (trainability, generalization, modeling demand, conditional ceiling). Missing any one of them makes model-size selection non-attributable. This workflow stays aligned with the reproducible-comparison mindset in P1/P3/P4/P5/P6.
+- Common problems: choosing model size from sample count only; ignoring video temporal complexity or SMPL-H parameter validity; ignoring alignment noise in text-conditioned training.
 - Solution:
-  1) First complete the four sets of indicator statistics for each type of data (scale/quality/complexity/alignment), and then proceed to model selection.
-  2) First, the "conservative baseline backbone" of each type of data is given according to the rules, and then upgraded to a larger model after passing the fixed protocol comparison and verification.
+  1) If `G=0`, clean data first and do not move to the large tier.
+  2) Start from `P_target`, then run a two-tier controlled comparison (for example medium vs large).
+  3) Freeze sampler/NFE/sample count/random seed during comparison and change model-size tier only (see 5.5-5.6).
 
 ### A.1 DiT/DyDiT scale scale table (select layers/heads/width) Citation: P5 p17 (Table 7)
 

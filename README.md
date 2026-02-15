@@ -20,3 +20,13 @@ This repository provides a bilingual playbook for building and tuning diffusion 
 
 If this repository is useful to you, please leave a star on GitHub.
 
+## Experiments (DDPM demo)
+
+`ddpm.py` supports per-epoch visualization and (CIFAR-10) FID tracking. Each run is stored in `runs/<run_name>/`.
+
+Sweep multiple variants (30 epochs each) and compare best FID:
+
+```bash
+python tools/run_sweep.py --sweep sweeps/sweep_example.json --epochs 30 --fid-every 1 --fid-num-samples 1000
+python tools/summarize_sweep.py
+```
