@@ -1,0 +1,1314 @@
+
+
+=== PAGE 1 ===
+Improved Denoising Diffusion Probabilistic Models
+Alex Nichol * 1 Prafulla Dhariwal * 1
+Abstract
+Denoising diffusion probabilistic models (DDPM)
+are a class of generative models which have re-
+cently been shown to produce excellent sam-
+ples. We show that with a few simple modiﬁ-
+cations, DDPMs can also achieve competitive log-
+likelihoods while maintaining high sample quality.
+Additionally, we ﬁnd that learning variances of
+the reverse diffusion process allows sampling with
+an order of magnitude fewer forward passes with
+a negligible difference in sample quality, which
+is important for the practical deployment of these
+models. We additionally use precision and re-
+call to compare how well DDPMs and GANs
+cover the target distribution. Finally, we show
+that the sample quality and likelihood of these
+models scale smoothly with model capacity and
+training compute, making them easily scalable.
+We release our code at https://github.com/
+openai/improved-diffusion.
+1. Introduction
+Sohl-Dickstein et al. (2015) introduced diffusion probabilis-
+tic models, a class of generative models which match a
+data distribution by learning to reverse a gradual, multi-step
+noising process. More recently, Ho et al. (2020) showed
+an equivalence between denoising diffusion probabilistic
+models (DDPM) and score based generative models (Song
+& Ermon, 2019; 2020), which learn a gradient of the log-
+density of the data distribution using denoising score match-
+ing (Hyv¨arinen, 2005). It has recently been shown that this
+class of models can produce high-quality images (Ho et al.,
+2020; Song & Ermon, 2020; Jolicoeur-Martineau et al.,
+2020) and audio (Chen et al., 2020b; Kong et al., 2020),
+but it has yet to be shown that DDPMs can achieve log-
+likelihoods competitive with other likelihood-based models
+such as autoregressive models (van den Oord et al., 2016c)
+and V AEs (Kingma & Welling, 2013). This raises various
+questions, such as whether DDPMs are capable of capturing
+all the modes of a distribution. Furthermore, while Ho et al.
+*Equal contribution 1OpenAI, San Francisco, USA. Correspon-
+dence to:<alex@openai.com>,<prafulla@openai.com>.
+(2020) showed extremely good results on the CIFAR-10
+(Krizhevsky, 2009) and LSUN (Yu et al., 2015) datasets, it
+is unclear how well DDPMs scale to datasets with higher di-
+versity such as ImageNet. Finally, while Chen et al. (2020b)
+found that DDPMs can efﬁciently generate audio using a
+small number of sampling steps, it has yet to be shown that
+the same is true for images.
+In this paper, we show that DDPMs can achieve log-
+likelihoods competitive with other likelihood-based models,
+even on high-diversity datasets like ImageNet. To more
+tightly optimise the variational lower-bound (VLB), we
+learn the reverse process variances using a simple reparame-
+terization and a hybrid learning objective that combines the
+VLB with the simpliﬁed objective from Ho et al. (2020).
+We ﬁnd surprisingly that, with our hybrid objective, our
+models obtain better log-likelihoods than those obtained
+by optimizing the log-likelihood directly, and discover that
+the latter objective has much more gradient noise during
+training. We show that a simple importance sampling tech-
+nique reduces this noise and allows us to achieve better
+log-likelihoods than with the hybrid objective.
+After incorporating learned variances into our model, we
+surprisingly discovered that we could sample in fewer steps
+from our models with very little change in sample quality.
+While DDPM (Ho et al., 2020) requires hundreds of for-
+ward passes to produce good samples, we can achieve good
+samples with as few as 50 forward passes, thus speeding
+up sampling for use in practical applications. In parallel to
+our work, Song et al. (2020a) develops a different approach
+to fast sampling, and we compare against their approach,
+DDIM, in our experiments.
+While likelihood is a good metric to compare against other
+likelihood-based models, we also wanted to compare the
+distribution coverage of these models with GANs. We use
+the improved precision and recall metrics (Kynk¨a¨anniemi
+et al., 2019) and discover that diffusion models achieve
+much higher recall for similar FID, suggesting that they do
+indeed cover a much larger portion of the target distribution.
+Finally, since we expect machine learning models to con-
+sume more computational resources in the future, we evalu-
+ate the performance of these models as we increase model
+size and training compute. Similar to (Henighan et al.,
+arXiv:2102.09672v1  [cs.LG]  18 Feb 2021
+
+
+=== PAGE 2 ===
+Improved Denoising Diffusion Probabilistic Models 2
+2020), we observe trends that suggest predictable improve-
+ments in performance as we increase training compute.
+2. Denoising Diffusion Probabilistic Models
+We brieﬂy review the formulation of DDPMs from Ho et al.
+(2020). This formulation makes various simplifying assump-
+tions, such as a ﬁxed noising processq which adds diagonal
+Gaussian noise at each timestep. For a more general deriva-
+tion, see Sohl-Dickstein et al. (2015).
+2.1. Deﬁnitions
+Given a data distributionx0∼q(x0), we deﬁne a forward
+noising processq which produces latentsx1 throughxT by
+adding Gaussian noise at timet with varianceβt∈ (0, 1) as
+follows:
+q(x1,...,x T|x0) :=
+T∏
+t=1
+q(xt|xt−1) (1)
+q(xt|xt−1) :=N (xt;
+√
+1−βtxt−1,βtI) (2)
+Given sufﬁciently largeT and a well behaved schedule of
+βt, the latentxT is nearly an isotropic Gaussian distribution.
+Thus, if we know the exact reverse distributionq(xt−1|xt),
+we can samplexT∼N (0, I) and run the process in reverse
+to get a sample from q(x0). However, since q(xt−1|xt)
+depends on the entire data distribution, we approximate it
+using a neural network as follows:
+pθ(xt−1|xt) :=N (xt−1;µθ(xt,t ), Σθ(xt,t )) (3)
+The combination of q andp is a variational auto-encoder
+(Kingma & Welling, 2013), and we can write the variational
+lower bound (VLB) as follows:
+Lvlb :=L0 +L1 +... +LT −1 +LT (4)
+L0 :=− logpθ(x0|x1) (5)
+Lt−1 :=DKL(q(xt−1|xt,x 0)||pθ(xt−1|xt)) (6)
+LT :=DKL(q(xT|x0)||p(xT )) (7)
+Aside fromL0, each term of Equation 4 is aKL divergence
+between two Gaussians, and can thus be evaluated in closed
+form. To evaluateL0 for images, we assume that each color
+component is divided into 256 bins, and we compute the
+probability ofpθ(x0|x1) landing in the correct bin (which is
+tractable using the CDF of the Gaussian distribution). Also
+note that whileLT does not depend onθ, it will be close to
+zero if the forward noising process adequately destroys the
+data distribution so thatq(xT|x0)≈N (0, I).
+As noted in (Ho et al., 2020), the noising process deﬁned
+in Equation 2 allows us to sample an arbitrary step of the
+noised latents directly conditioned on the input x0. With
+αt := 1−βt and ¯αt :=∏t
+s=0αs, we can write the marginal
+q(xt|x0) =N (xt;√¯αtx0, (1− ¯αt)I) (8)
+xt =√¯αtx0 +
+√
+1− ¯αtϵ (9)
+whereϵ∼N (0, I). Here, 1− ¯αt tells us the variance of the
+noise for an arbitrary timestep, and we could equivalently
+use this to deﬁne the noise schedule instead ofβt.
+Using Bayes theorem, one can calculate the posterior
+q(xt−1|xt,x 0) in terms of ˜βt and ˜µt(xt,x 0) which are de-
+ﬁned as follows:
+˜βt := 1− ¯αt−1
+1− ¯αt
+βt (10)
+˜µt(xt,x 0) :=
+√¯αt−1βt
+1− ¯αt
+x0 +
+√αt(1− ¯αt−1)
+1− ¯αt
+xt
+(11)
+q(xt−1|xt,x 0) =N (xt−1; ˜µ(xt,x 0), ˜βtI) (12)
+2.2. Training in Practice
+The objective in Equation 4 is a sum of independent terms
+Lt−1, and Equation 9 provides an efﬁcient way to sample
+from an arbitrary step of the forward noising process and
+estimateLt−1 using the posterior (Equation 12) and prior
+(Equation 3). We can thus randomly samplet and use the
+expectationEt,x0,ϵ[Lt−1] to estimateLvlb. Ho et al. (2020)
+uniformly samplet for each image in each mini-batch.
+There are many different ways to parameterizeµθ(xt,t ) in
+the prior. The most obvious option is to predict µθ(xt,t )
+directly with a neural network. Alternatively, the network
+could predictx0, and this output could be used in Equation
+11 to produceµθ(xt,t ). The network could also predict the
+noiseϵ and use Equations 9 and 11 to derive
+µθ(xt,t ) = 1√αt
+(
+xt− βt√1− ¯αt
+ϵθ(xt,t )
+)
+(13)
+Ho et al. (2020) found that predicting ϵ worked best, es-
+pecially when combined with a reweighted loss function:
+Lsimple =Et,x0,ϵ
+[
+||ϵ−ϵθ(xt,t )||2]
+(14)
+This objective can be seen as a reweighted form of Lvlb
+(without the terms affecting Σθ). The authors found that
+optimizing this reweighted objective resulted in much better
+sample quality than optimizing Lvlb directly, and explain
+this by drawing a connection to generative score matching
+(Song & Ermon, 2019; 2020).
+One subtlety is thatLsimple provides no learning signal for
+Σθ(xt,t ). This is irrelevant, however, since Ho et al. (2020)
+achieved their best results by ﬁxing the variance to σ2
+t I
+rather than learning it. They found that they achieve similar
+
+
+=== PAGE 3 ===
+Improved Denoising Diffusion Probabilistic Models 3
+sample quality using eitherσ2
+t =βt orσ2
+t = ˜βt, which are
+the upper and lower bounds on the variance given byq(x0)
+being either isotropic Gaussian noise or a delta function,
+respectively.
+3. Improving the Log-likelihood
+While Ho et al. (2020) found that DDPMs can generate high-
+ﬁdelity samples according to FID (Heusel et al., 2017) and
+Inception Score (Salimans et al., 2016), they were unable to
+achieve competitive log-likelihoods with these models. Log-
+likelihood is a widely used metric in generative modeling,
+and it is generally believed that optimizing log-likelihood
+forces generative models to capture all of the modes of
+the data distribution (Razavi et al., 2019). Additionally,
+recent work (Henighan et al., 2020) has shown that small
+improvements in log-likelihood can have a dramatic impact
+on sample quality and learnt feature representations. Thus, it
+is important to explore why DDPMs seem to perform poorly
+on this metric, since this may suggest a fundamental short-
+coming such as bad mode coverage. This section explores
+several modiﬁcations to the algorithm described in Section
+2 that, when combined, allow DDPMs to achieve much bet-
+ter log-likelihoods on image datasets, suggesting that these
+models enjoy the same beneﬁts as other likelihood-based
+generative models.
+To study the effects of different modiﬁcations, we train
+ﬁxed model architectures with ﬁxed hyperparameters on
+the ImageNet 64× 64 (van den Oord et al., 2016b) and
+CIFAR-10 (Krizhevsky, 2009) datasets. While CIFAR-10
+has seen more usage for this class of models, we chose
+to study ImageNet 64× 64 as well because it provides a
+good trade-off between diversity and resolution, allowing us
+to train models quickly without worrying about overﬁtting.
+Additionally, ImageNet64×64 has been studied extensively
+in the context of generative modeling (van den Oord et al.,
+2016c; Menick & Kalchbrenner, 2018; Child et al., 2019;
+Roy et al., 2020), allowing us to compare DDPMs directly
+to many other generative models.
+The setup from Ho et al. (2020) (optimizing Lsimple while
+settingσ2
+t = βt andT = 1000) achieves a log-likelihood
+of 3.99 (bits/dim) on ImageNet 64× 64 after 200K training
+iterations. We found in early experiments that we could
+get a boost in log-likelihood by increasingT from 1000 to
+4000; with this change, the log-likelihood improves to 3.77.
+For the remainder of this section, we useT = 4000, but we
+explore this choice in Section 4.
+3.1. Learning Σθ(xt,t )
+In Ho et al. (2020), the authors set Σθ(xt,t ) =σ2
+t I, where
+σt is not learned. Oddly, they found that ﬁxing σ2
+t toβt
+yielded roughly the same sample quality as ﬁxing it to ˜βt.
+0.0 0.2 0.4 0.6 0.8 1.0
+diffusion step (t/T)
+100
+3 × 10−1
+4 × 10−1
+6 × 10−1
+̃β t/β t
+T ̃ 100 steps
+T ̃ 1000 steps
+T ̃ 10000 steps
+Figure 1. The ratio ˜βt/βt for every diffusion step for diffusion
+processes of different lengths.
+0 500 1000 1500 2000 2500 3000 3500 4000
+diffusion step
+10−7
+10−6
+10−5
+10−4
+10−3
+10−2
+10−1
+100
+loss term (bits)
+Figure 2. Terms of the VLB vs diffusion step. The ﬁrst few terms
+contribute most to NLL.
+Considering thatβt and ˜βt represent two opposite extremes,
+it is reasonable to ask why this choice doesn’t affect samples.
+One clue is given by Figure 1, which shows thatβt and ˜βt
+are almost equal except near t = 0, i.e. where the model
+is dealing with imperceptible details. Furthermore, as we
+increase the number of diffusion steps, βt and ˜βt seem to
+remain close to one another for more of the diffusion process.
+This suggests that, in the limit of inﬁnite diffusion steps,
+the choice ofσt might not matter at all for sample quality.
+In other words, as we add more diffusion steps, the model
+meanµθ(xt,t ) determines the distribution much more than
+Σθ(xt,t ).
+While the above argument suggests that ﬁxingσt is a reason-
+able choice for the sake of sample quality, it says nothing
+about log-likelihood. In fact, Figure 2 shows that the ﬁrst
+few steps of the diffusion process contribute the most to
+the variational lower bound. Thus, it seems likely that we
+could improve log-likelihood by using a better choice of
+Σθ(xt,t ). To achieve this, we must learn Σθ(xt,t ) without
+the instabilities encountered by Ho et al. (2020).
+Since Figure 1 shows that the reasonable range forΣθ(xt,t )
+is very small, it would be hard for a neural network to predict
+Σθ(xt,t ) directly, even in the log domain, as observed by
+Ho et al. (2020). Instead, we found it better to parameterize
+the variance as an interpolation between βt and ˜βt in the
+
+
+=== PAGE 4 ===
+Improved Denoising Diffusion Probabilistic Models 4
+Figure 3. Latent samples from linear (top) and cosine (bottom)
+schedules respectively at linearly spaced values oft from 0 toT .
+The latents in the last quarter of the linear schedule are almost
+purely noise, whereas the cosine schedule adds noise more slowly
+0.0 0.1 0.2 0.3 0.4 0.5
+fraction of reverse diffusion process skipped
+20
+30
+40
+50
+60FID
+cosine schedule
+linear schedule
+Figure 4. FID when skipping a preﬁx of the reverse diffusion
+process on ImageNet 64 × 64.
+log domain. In particular, our model outputs a vector v
+containing one component per dimension, and we turn this
+output into variances as follows:
+Σθ(xt,t ) = exp(v logβt + (1−v) log ˜βt) (15)
+We did not apply any constraints onv, theoretically allowing
+the model to predict variances outside of the interpolated
+range. However, we did not observe the network doing
+this in practice, suggesting that the bounds for Σθ(xt,t ) are
+indeed expressive enough.
+SinceLsimple doesn’t depend on Σθ(xt,t ), we deﬁne a new
+hybrid objective:
+Lhybrid =Lsimple +λLvlb (16)
+For our experiments, we setλ = 0.001 to preventLvlb from
+overwhelmingLsimple. Along this same line of reasoning,
+we also apply a stop-gradient to theµθ(xt,t ) output for the
+Lvlb term. This way,Lvlb can guide Σθ(xt,t ) whileLsimple
+is still the main source of inﬂuence over µθ(xt,t ).
+3.2. Improving the Noise Schedule
+We found that while the linear noise schedule used in Ho
+et al. (2020) worked well for high resolution images, it was
+sub-optimal for images of resolution 64× 64 and 32× 32.
+In particular, the end of the forward noising process is too
+0.0 0.2 0.4 0.6 0.8 1.0
+diffusion step (t/T)
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0/uni0304α t
+linēr
+cosine
+Figure 5. ¯αt throughout diffusion in the linear schedule and our
+proposed cosine schedule.
+noisy, and so doesn’t contribute very much to sample quality.
+This can be seen visually in Figure 3. The result of this
+effect is studied in Figure 4, where we see that a model
+trained with the linear schedule does not get much worse (as
+measured by FID) when we skip up to 20% of the reverse
+diffusion process.
+To address this problem, we construct a different noise
+schedule in terms of ¯αt:
+¯αt = f(t)
+f(0), f (t) = cos
+(t/T +s
+1 +s · π
+2
+)2
+(17)
+To go from this deﬁnition to variances βt, we note that
+βt = 1− ¯αt
+¯αt−1
+. In practice, we clipβt to be no larger than
+0.999 to prevent singularities at the end of the diffusion
+process neart =T .
+Our cosine schedule is designed to have a linear drop-off of
+¯αt in the middle of the process, while changing very little
+near the extremes of t = 0 andt = T to prevent abrupt
+changes in noise level. Figure 5 shows how ¯αt progresses
+for both schedules. We can see that the linear schedule from
+Ho et al. (2020) falls towards zero much faster, destroying
+information more quickly than necessary.
+We use a small offsets to preventβt from being too small
+near t = 0 , since we found that having tiny amounts of
+noise at the beginning of the process made it hard for the
+network to predict ϵ accurately enough. In particular, we
+selecteds such that√β0 was slightly smaller than the pixel
+bin size 1/127.5, which gives s = 0.008. We chose to
+usecos2 in particular because it is a common mathematical
+function with the shape we were looking for. This choice
+was arbitrary, and we expect that many other functions with
+similar shapes would work as well.
+3.3. Reducing Gradient Noise
+We expected to achieve the best log-likelihoods by optimiz-
+ingLvlb directly, rather than by optimizingLhybrid. However,
+
+
+=== PAGE 5 ===
+Improved Denoising Diffusion Probabilistic Models 5
+0 50 100 150 200 250
+training iterations (1e3)
+3.00
+3.25
+3.50
+3.75
+4.00
+4.25
+4.50
+4.75
+5.00training log loss (bits/dim)
+Lvlb
+Lhybrid
+Lvlb (resampled)
+Figure 6. Learning curves comparing the log-likelihoods achieved
+by different objectives on ImageNet 64 × 64.
+0 25 50 75 100 125 150 175 200
+training step (1e3)
+10−1
+100
+101
+102
+103
+104
+105
+gradient noise scale
+Lvlb
+Lhybrid
+Figure 7. Gradient noise scales for theLvlb andLhybrid objectives
+on ImageNet 64 × 64.
+we were surprised to ﬁnd thatLvlb was actually quite difﬁ-
+cult to optimize in practice, at least on the diverse ImageNet
+64× 64 dataset. Figure 6 shows the learning curves for both
+Lvlb andLhybrid. Both curves are noisy, but the hybrid objec-
+tive clearly achieves better log-likelihoods on the training
+set given the same amount of training time.
+We hypothesized that the gradient ofLvlb was much noisier
+than that of Lhybrid. We conﬁrmed this by evaluating the
+gradient noise scales (McCandlish et al., 2018) for models
+trained with both objectives, as shown in Figure 7. Thus,
+we sought out a way to reduce the variance ofLvlb in order
+to optimize directly for log-likelihood.
+Noting that different terms of Lvlb have greatly different
+magnitudes (Figure 2), we hypothesized that sampling t
+uniformly causes unnecessary noise in the Lvlb objective.
+To address this, we employ importance sampling:
+Lvlb =Et∼pt
+[Lt
+pt
+]
+, wherept∝
+√
+E[L2
+t ] and
+∑
+pt = 1
+(18)
+Since E[L2
+t ] is unknown beforehand and may change
+throughout training, we maintain a history of the previous
+10 values for each loss term, and update this dynamically
+during training. At the beginning of training, we samplet
+Table 1. Ablating schedule and objective on ImageNet 64 × 64.
+Iters T Schedule Objective NLL FID
+200K 1K linear Lsimple 3.99 32.5
+200K 4K linear Lsimple 3.77 31.3
+200K 4K linear Lhybrid 3.66 32.2
+200K 4K cosine Lsimple 3.68 27.0
+200K 4K cosine Lhybrid 3.62 28.0
+200K 4K cosine Lvlb 3.57 56.7
+1.5M 4K cosine Lhybrid 3.57 19.2
+1.5M 4K cosine Lvlb 3.53 40.1
+Table 2. Ablating schedule and objective on CIFAR-10.
+Iters T Schedule Objective NLL FID
+500K 1K linear Lsimple 3.73 3.29
+500K 4K linear Lsimple 3.37 2.90
+500K 4K linear Lhybrid 3.26 3.07
+500K 4K cosine Lsimple 3.26 3.05
+500K 4K cosine Lhybrid 3.17 3.19
+500K 4K cosine Lvlb 2.94 11.47
+uniformly until we draw 10 samples for everyt∈ [0,T− 1].
+With this importance sampled objective, we are able to
+achieve our best log-likelihoods by optimizing Lvlb. This
+can be seen in Figure 6 as theLvlb (resampled) curve. The
+ﬁgure also shows that the importance sampled objective is
+considerably less noisy than the original, uniformly sam-
+pled objective. We found that the importance sampling
+technique was not helpful when optimizing the less-noisy
+Lhybrid objective directly.
+3.4. Results and Ablations
+In this section, we ablate the changes we have made to
+achieve better log-likelihoods. Table 1 summarizes the re-
+sults of our ablations on ImageNet 64× 64, and Table 2
+shows them for CIFAR-10. We also trained our best Ima-
+geNet 64× 64 models for 1.5M iterations, and report these
+results as well. Lvlb andLhybrid were trained with learned
+sigmas using the parameterization from Section 3.1. For
+Lvlb, we used the resampling scheme from Section 3.3.
+Based on our ablations, usingLhybrid and our cosine sched-
+ule improves log-likelihood while keeping similar FID as
+the baseline from Ho et al. (2020). OptimizingLvlb further
+improves log-likelihood at the cost of a higher FID. We
+generally prefer to useLhybrid overLvlb as it gives a boost
+in likelihood without sacriﬁcing sample quality.
+In Table 3 we compare our best likelihood models against
+prior work, showing that these models are competitive with
+the best conventional methods in terms of log-likelihood.
+
+
+=== PAGE 6 ===
+Improved Denoising Diffusion Probabilistic Models 6
+Table 3. Comparison of DDPMs to other likelihood-based mod-
+els on CIFAR-10 and Unconditional ImageNet 64 × 64. NLL is
+reported in bits/dim. On ImageNet 64 × 64, our model is compet-
+itive with the best convolutional models, but is worse than fully
+transformer-based architectures.
+Model ImageNet CIFAR
+Glow (Kingma & Dhariwal, 2018) 3.81 3.35
+Flow++ (Ho et al., 2019) 3.69 3.08
+PixelCNN (van den Oord et al., 2016c) 3.57 3.14
+SPN (Menick & Kalchbrenner, 2018) 3.52 -
+NV AE (Vahdat & Kautz, 2020) - 2.91
+Very Deep V AE (Child, 2020) 3.52 2.87
+PixelSNAIL (Chen et al., 2018) 3.52 2.85
+Image Transformer (Parmar et al., 2018) 3.48 2.90
+Sparse Transformer (Child et al., 2019) 3.44 2.80
+Routing Transformer (Roy et al., 2020) 3.43 -
+DDPM (Ho et al., 2020) 3.77 3.70
+DDPM (cont ﬂow) (Song et al., 2020b) - 2.99
+Improved DDPM (ours) 3.53 2.94
+4. Improving Sampling Speed
+All of our models were trained with 4000 diffusion steps,
+and thus producing a single sample takes several minutes on
+a modern GPU. In this section, we explore how performance
+scales if we reduce the steps used during sampling, and ﬁnd
+that our pre-trainedLhybrid models can produce high-quality
+samples with many fewer diffusion steps than they were
+trained with (without any ﬁne-tuning). Reducing the steps
+in this way makes it possible to sample from our models
+in a number of seconds rather than minutes, and greatly
+improves the practical applicability of image DDPMs.
+For a model trained with T diffusion steps, we would
+typically sample using the same sequence of t values
+(1, 2,...,T ) as used during training. However, it is also
+possible to sample using an arbitrary subsequence S oft
+values. Given the training noise schedule ¯αt, for a given
+sequenceS we can obtain the sampling noise schedule ¯αSt,
+which can be then used to obtain corresponding sampling
+variances
+βSt = 1− ¯αSt
+¯αSt−1
+, ˜βSt = 1− ¯αSt−1
+1− ¯αSt
+βSt (19)
+Now, sinceΣθ(xSt,St) is parameterized as a range between
+βSt and ˜βSt, it will automatically be rescaled for the shorter
+diffusion process. We can thus compute p(xSt−1|xSt) as
+N (µθ(xSt,St), Σθ(xSt,St)).
+To reduce the number of sampling steps fromT toK, we
+useK evenly spaced real numbers between 1 andT (inclu-
+sive), and then round each resulting number to the nearest
+integer. In Figure 8, we evaluate FIDs for anLhybrid model
+and anLsimple model that were trained with 4000 diffusion
+Lsimple (σ2
+t = βt, mid-training)
+Lsimple (σ2
+t = βt, fully trained)
+Lsimple (σ2
+t = ̃βt, mid-training)
+Lsimple (σ2
+t = ̃βt, fully trained)
+Lsimple (̃̃IM, mid-training)
+Lsimple (̃̃IM, fully trained)
+Lhybrid (ours, mid-training)
+Lhybrid (ours, fully trained)
+102 103
+sampling steps
+15.0
+20.0
+25.0
+30.0
+35.0
+40.0FID
+102 103
+sampling steps
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0FID
+Figure 8. FID versus number of sampling steps, for models trained
+on ImageNet 64 × 64 (top) and CIFAR-10 (bottom). All models
+were trained with 4000 diffusion steps.
+steps, using 25, 50, 100, 200, 400, 1000, and 4000 sampling
+steps. We do this for both a fully-trained checkpoint, and
+a checkpoint mid-way through training. For CIFAR-10 we
+used 200K and 500K training iterations, and for ImageNet-
+64 we used 500K and 1500K training iterations. We ﬁnd
+that the Lsimple models with ﬁxed sigmas (with both the
+largerσ2
+t =βt and the smallerσ2
+t = ˜βt) suffer much more
+in sample quality when using a reduced number of sampling
+steps, whereas ourLhybrid model with learnt sigmas main-
+tains high sample quality. With this model, 100 sampling
+steps is sufﬁcient to achieve near-optimal FIDs for our fully
+trained models.
+Parallel to our work, Song et al. (2020a) propose a fast
+sampling algorithm for DDPMs by producing a new im-
+plicit model that has the same marginal noise distributions,
+but deterministically maps noise to images. We include
+their algorithm, DDIM, in Figure 8, ﬁnding that DDIM pro-
+duces better samples with fewer than 50 sampling steps, but
+worse samples when using 50 or more steps. Interestingly,
+DDIM performs worse at the start of training, but closes the
+gap to other samplers as training continues. We found that
+our striding technique drastically reduced performance of
+DDIM, so our DDIM results instead use the constant strid-
+
+
+=== PAGE 7 ===
+Improved Denoising Diffusion Probabilistic Models 7
+Table 4. Sample quality comparison on class-conditional Ima-
+geNet 64 × 64. Precision and recall (Kynk¨a¨anniemi et al., 2019)
+are measured using Inception-V3 features andK = 5. We trained
+BigGAN-deep for 125K iterations, and did not use truncation for
+sampling to maximize recall for the GAN.
+Model FID Prec. Recall
+BigGAN-deep (Brock et al., 2018) 4.06 0.86 0.59
+Improved Diffusion (small) 6.92 0.77 0.72
+Improved Diffusion (large) 2.92 0.82 0.71
+Figure 9. Class-conditional ImageNet 64 × 64 samples generated
+using 250 sampling steps from Lhybrid model (FID 2.92). The
+classes are 9: ostrich, 11: goldﬁnch, 130: ﬂamingo, 141: redshank,
+154: pekinese, 157: papillon, 97: drake and 28: spotted salamander.
+We see that there is a high diversity in each class, suggesting good
+coverage of the target distribution
+ing1 from Song et al. (2020a), wherein the ﬁnal timestep is
+T−T/K + 1 rather thanT . The other samplers performed
+slightly better with our striding.
+5. Comparison to GANs
+While likelihood is a good proxy for mode-coverage, it is
+difﬁcult to compare to GANs with this metric. Instead, we
+turn to precision and recall (Kynk ¨a¨anniemi et al., 2019).
+Since it is common in the GAN literature to train class-
+conditional models, we do the same for this experiment.
+To make our models class-conditional, we inject class in-
+formation through the same pathway as the timestep t. In
+particular, we add a class embedding vi to the timestep
+embeddinget, and pass this embedding to residual blocks
+1We additionally tried the quadratic stride from Song et al.
+(2020a), but found that it hurt sample quality when combined with
+our cosine schedule.
+throughout the model. We train using theLhybrid objective
+and use 250 sampling steps. We train two models: a ”small”
+model with 100M parameters for 1.7M training steps, and
+a larger model with 270 million parameters for 250K it-
+erations. We train one BigGAN-deep model with 100M
+parameters across the generator and discriminator.
+When computing metrics for this task, we generated 50K
+samples (rather than 10K) to be directly comparable to other
+works.2 This is the only ImageNet 64× 64 FID we report
+that was computed using 50K samples. For FID, the ref-
+erence distribution features were computed over the full
+training set, following (Brock et al., 2018).
+Figure 9 shows our samples from the larger model, and
+Table 4 summarizes our results. We ﬁnd that BigGAN-
+deep outperforms our smaller model in terms of FID, but
+struggles in terms of recall. This suggests that diffusion
+models are better at covering the modes of the distribution
+than comparable GANs.
+6. Scaling Model Size
+In the previous sections, we showed algorithmic changes
+that improved log-likelihood and FID without changing the
+amount of training compute. However, a trend in modern
+machine learning is that larger models and more training
+time tend to improve model performance (Kaplan et al.,
+2020; Chen et al., 2020a; Brown et al., 2020). Given this
+observation, we investigate how FID and NLL scale as a
+function of training compute. Our results, while prelimi-
+nary, suggest that DDPMs improve in a predictable way as
+training compute increases.
+To measure how performance scales with training compute,
+we train four different models on ImageNet 64× 64 with
+theLhybrid objective described in Section 3.1. To change
+model capacity, we apply a depth multiplier across all lay-
+ers, such that the ﬁrst layer has either 64, 96, 128, or 192
+channels. Note that our previous experiments used 128
+channels in the ﬁrst layer. Since the depth of each layer af-
+fects the scale of the initial weights, we scale the Adam
+(Kingma & Ba, 2014) learning rate for each model by
+1/√channel multiplier, such that the 128 channel model
+has a learning rate of 0.0001 (as in our other experiments).
+Figure 10 shows how FID and NLL improve relative to
+theoretical training compute.3 The FID curve looks approx-
+imately linear on a log-log plot, suggesting that FID scales
+according to a power law (plotted as the black dashed line).
+The NLL curve does not ﬁt a power law as cleanly, suggest-
+ing that validation NLL scales in a less-favorable manner
+2We found that using more samples led to a decrease in esti-
+mated FID of roughly 2 points.
+3The x-axis assumes full hardware utilization
+
+
+=== PAGE 8 ===
+Improved Denoising Diffusion Probabilistic Models 8
+1017 1018 1019 1020
+compute (FLOPs)
+20.0
+30.0
+40.0
+50.0
+60.0
+70.0FID
+64 ch (30M params)
+96 ch (68M params)
+128 ch (120M params)
+192 ch (270M params)
+4.00 + (2.500e-25*C)^-0.22
+1017 1018 1019 1020
+compute (FLOPs)
+3.55
+3.60
+3.65
+3.70
+3.75
+3.80NLL (bits/dim)
+64 ch (30M params)
+96 ch (68M params)
+128 ch (120M params)
+192 ch (270M params)
+3.40 + (3.000e-15*C)^-0.17
+Figure 10. FID and validation NLL throughout training on Im-
+ageNet 64 × 64 for different model sizes. The constant for the
+FID trend line was approximated using the FID of in-distribution
+data. For the NLL trend line, the constant was approximated by
+rounding down the current state-of-the-art NLL (Roy et al., 2020)
+on this dataset.
+than FID. This could be caused by a variety of factors, such
+as 1) an unexpectedly high irreducible loss (Henighan et al.,
+2020) for this type of diffusion model, or 2) the model over-
+ﬁtting to the training distribution. We also note that these
+models do not achieve optimal log-likelihoods in general
+because they were trained with ourLhybrid objective and not
+directly with Lvlb to keep both good log-likelihoods and
+sample quality.
+7. Related Work
+Chen et al. (2020b) and Kong et al. (2020) are two recent
+works that use DDPMs to produce high ﬁdelity audio condi-
+tioned on mel-spectrograms. Concurrent to our work, Chen
+et al. (2020b) use a combination of improved schedule and
+L1 loss to allow sampling with fewer steps with very lit-
+tle reduction in sample quality. However, compared to our
+unconditional image generation task, their generative task
+has a strong input conditioning signal provided by the mel-
+spectrograms, and we hypothesize that this makes it easier
+to sample with fewer diffusion steps.
+Jolicoeur-Martineau et al. (2020) explored score matching
+in the image domain, and constructed an adversarial training
+objective to produce betterx0 predictions. However, they
+found that choosing a better network architecture removed
+the need for this adversarial objective, suggesting that the ad-
+versarial objective is not necessary for powerful generative
+modeling.
+Parallel to our work, Song et al. (2020a) and Song et al.
+(2020b) propose fast sampling algorithms for models trained
+with the DDPM objective by leveraging different sampling
+processes. Song et al. (2020a) does this by deriving an im-
+plicit generative model that has the same marginal noise
+distributions as DDPMs while deterministically mapping
+noise to images. Song et al. (2020b) model the diffusion
+process as the discretization of a continuous SDE, and ob-
+serve that there exists an ODE that corresponds to sampling
+from the reverse SDE. By varying the numerical precision
+of an ODE solver, they can sample with fewer function
+evaluations. However, they note that this technique obtains
+worse samples than ancestral sampling when used directly,
+and only achieves better FID when combined with Langevin
+corrector steps. This in turn requires hand-tuning of a signal-
+to-noise ratio for the Langevin steps. Our method allows
+fast sampling directly from the ancestral process, which
+removes the need for extra hyperparameters.
+Also in parallel, Gao et al. (2020) develops a diffusion model
+with reverse diffusion steps modeled by an energy-based
+model. A potential implication of this approach is that fewer
+diffusion steps should be needed to achieve good samples.
+8. Conclusion
+We have shown that, with a few modiﬁcations, DDPMs can
+sample much faster and achieve better log-likelihoods with
+little impact on sample quality. The likelihood is improved
+by learning Σθ using our parameterization and Lhybrid ob-
+jective. This brings the likelihood of these models much
+closer to other likelihood-based models. We surprisingly
+discover that this change also allows sampling from these
+models with many fewer steps.
+We have also found that DDPMs can match the sample qual-
+ity of GANs while achieving much better mode coverage
+as measured by recall. Furthermore, we have investigated
+how DDPMs scale with the amount of available training
+compute, and found that more training compute trivially
+leads to better sample quality and log-likelihood.
+The combination of these results makes DDPMs an attrac-
+tive choice for generative modeling, since they combine
+good log-likelihoods, high-quality samples, and reasonably
+fast sampling with a well-grounded, stationary training ob-
+jective that scales easily with training compute. These re-
+sults indicate that DDPMs are a promising direction for
+future research.
+
+
+=== PAGE 9 ===
+Improved Denoising Diffusion Probabilistic Models 9
+References
+Brock, A., Donahue, J., and Simonyan, K. Large scale gan
+training for high ﬁdelity natural image synthesis. arXiv
+preprint arXiv:1809.11096, 2018.
+Brown, T. B., Mann, B., Ryder, N., Subbiah, M., Kaplan,
+J., Dhariwal, P., Neelakantan, A., Shyam, P., Sastry, G.,
+Askell, A., Agarwal, S., Herbert-V oss, A., Krueger, G.,
+Henighan, T., Child, R., Ramesh, A., Ziegler, D. M., Wu,
+J., Winter, C., Hesse, C., Chen, M., Sigler, E., Litwin, M.,
+Gray, S., Chess, B., Clark, J., Berner, C., McCandlish,
+S., Radford, A., Sutskever, I., and Amodei, D. Language
+models are few-shot learners, 2020.
+Chen, M., Radford, A., Child, R., Wu, J., Jun, H.,
+Dhariwal, P., Luan, D., and Sutskever, I. Genera-
+tive pretraining from pixels, 2020a. URL https:
+//cdn.openai.com/papers/Generative_
+Pretraining_from_Pixels_V2.pdf.
+Chen, N., Zhang, Y ., Zen, H., Weiss, R. J., Norouzi, M., and
+Chan, W. Wavegrad: Estimating gradients for waveform
+generation, 2020b.
+Chen, X., Mishra, N., Rohaninejad, M., and Abbeel, P.
+Pixelsnail: An improved autoregressive generative model.
+In International Conference on Machine Learning , pp.
+864–872. PMLR, 2018.
+Child, R. Very deep vaes generalize autoregressive models
+and can outperform them on images. arXiv preprint
+arXiv:2011.10650, 2020.
+Child, R., Gray, S., Radford, A., and Sutskever, I. Generat-
+ing long sequences with sparse transformers, 2019.
+Gao, R., Song, Y ., Poole, B., Wu, Y . N., and Kingma, D. P.
+Learning energy-based models by diffusion recovery like-
+lihood, 2020.
+He, K., Zhang, X., Ren, S., and Sun, J. Deep residual
+learning for image recognition, 2015.
+Henighan, T., Kaplan, J., Katz, M., Chen, M., Hesse, C.,
+Jackson, J., Jun, H., Brown, T. B., Dhariwal, P., Gray, S.,
+Hallacy, C., Mann, B., Radford, A., Ramesh, A., Ryder,
+N., Ziegler, D. M., Schulman, J., Amodei, D., and Mc-
+Candlish, S. Scaling laws for autoregressive generative
+modeling, 2020.
+Heusel, M., Ramsauer, H., Unterthiner, T., Nessler, B., and
+Hochreiter, S. Gans trained by a two time-scale update
+rule converge to a local nash equilibrium. Advances in
+Neural Information Processing Systems 30 (NIPS 2017),
+2017.
+Ho, J., Chen, X., Srinivas, A., Duan, Y ., and Abbeel, P.
+Flow++: Improving ﬂow-based generative models with
+variational dequantization and architecture design. arXiv
+preprint arXiv:1902.00275, 2019.
+Ho, J., Jain, A., and Abbeel, P. Denoising diffusion proba-
+bilistic models, 2020.
+Hyv¨arinen, A. Estimation of non-normalized statistical
+models by score matching. Journal of Machine Learning
+Research, 6(Apr):695–709, 2005.
+Jolicoeur-Martineau, A., Pich´e-Taillefer, R., des Combes,
+R. T., and Mitliagkas, I. Adversarial score matching and
+improved sampling for image generation, 2020.
+Kaplan, J., McCandlish, S., Henighan, T., Brown, T. B.,
+Chess, B., Child, R., Gray, S., Radford, A., Wu, J., and
+Amodei, D. Scaling laws for neural language models,
+2020.
+Kingma, D. P. and Ba, J. Adam: A method for stochastic
+optimization, 2014.
+Kingma, D. P. and Dhariwal, P. Glow: Generative ﬂow
+with invertible 1x1 convolutions. In Advances in neural
+information processing systems, pp. 10215–10224, 2018.
+Kingma, D. P. and Welling, M. Auto-encoding variational
+bayes, 2013.
+Kong, Z., Ping, W., Huang, J., Zhao, K., and Catanzaro, B.
+Diffwave: A versatile diffusion model for audio synthesis,
+2020.
+Krizhevsky, A. Learning multiple layers of
+features from tiny images, 2009. URL
+http://www.cs.toronto.edu/˜kriz/
+learning-features-2009-TR.pdf .
+Kynk¨a¨anniemi, T., Karras, T., Laine, S., Lehtinen, J., and
+Aila, T. Improved precision and recall metric for assess-
+ing generative models, 2019.
+McCandlish, S., Kaplan, J., Amodei, D., and Team, O. D.
+An empirical model of large-batch training, 2018.
+Menick, J. and Kalchbrenner, N. Generating high ﬁdelity im-
+ages with subscale pixel networks and multidimensional
+upscaling, 2018.
+Parmar, N., Vaswani, A., Uszkoreit, J., Kaiser,Ł., Shazeer,
+N., Ku, A., and Tran, D. Image transformer. arXiv
+preprint arXiv:1802.05751, 2018.
+Ravuri, S. and Vinyals, O. Classiﬁcation accuracy score
+for conditional generative models. arXiv preprint
+arXiv:1905.10887, 2019.
+
+
+=== PAGE 10 ===
+Improved Denoising Diffusion Probabilistic Models 10
+Razavi, A., van den Oord, A., and Vinyals, O. Generating
+diverse high-ﬁdelity images with vq-vae-2, 2019.
+Roy, A., Saffar, M., Vaswani, A., and Grangier, D. Efﬁcient
+content-based sparse attention with routing transformers,
+2020.
+Salimans, T., Goodfellow, I., Zaremba, W., Cheung, V .,
+Radford, A., and Chen, X. Improved techniques for
+training gans, 2016.
+Salimans, T., Karpathy, A., Chen, X., and Kingma, D. P. Pix-
+elcnn++: Improving the pixelcnn with discretized logistic
+mixture likelihood and other modiﬁcations, 2017.
+Sohl-Dickstein, J., Weiss, E. A., Maheswaranathan, N., and
+Ganguli, S. Deep unsupervised learning using nonequi-
+librium thermodynamics, 2015.
+Song, J., Meng, C., and Ermon, S. Denoising diffusion
+implicit models, 2020a.
+Song, Y . and Ermon, S. Generative modeling by estimating
+gradients of the data distribution. In Advances in Neural
+Information Processing Systems, pp. 11918–11930, 2019.
+Song, Y . and Ermon, S. Improved techniques for train-
+ing score-based generative models. arXiv preprint
+arXiv:2006.09011, 2020.
+Song, Y ., Sohl-Dickstein, J., Kingma, D. P., Kumar, A., Er-
+mon, S., and Poole, B. Score-based generative modeling
+through stochastic differential equations, 2020b.
+Vahdat, A. and Kautz, J. Nvae: A deep hierarchical vari-
+ational autoencoder. arXiv preprint arXiv:2007.03898 ,
+2020.
+van den Oord, A., Kalchbrenner, N., and Kavukcuoglu, K.
+Pixel recurrent neural networks, 2016a.
+van den Oord, A., Kalchbrenner, N., Vinyals, O., Espeholt,
+L., Graves, A., and Kavukcuoglu, K. Conditional image
+generation with pixelcnn decoders, 2016b. URL http:
+//image-net.org/small/download.php.
+van den Oord, A., Kalchbrenner, N., Vinyals, O., Espeholt,
+L., Graves, A., and Kavukcuoglu, K. Conditional image
+generation with pixelcnn decoders, 2016c.
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones,
+L., Gomez, A. N., Kaiser, L., and Polosukhin, I. Attention
+is all you need, 2017.
+Yu, F., Seff, A., Zhang, Y ., Song, S., Funkhouser, T., and
+Xiao, J. Lsun: Construction of a large-scale image dataset
+using deep learning with humans in the loop, 2015.
+
+
+=== PAGE 11 ===
+Improved Denoising Diffusion Probabilistic Models 11
+A. Hyperparameters
+For all of our experiments, we use a UNet model architec-
+ture4 similar to that used by Ho et al. (2020). We changed
+the attention layers to use multi-head attention (Vaswani
+et al., 2017), and opted to use four attention heads rather
+than one (while keeping the same total number of channels).
+We employ attention not only at the 16x16 resolution, but
+also at the 8x8 resolution. Additionally, we changed the
+way the model conditions ont. In particular, instead of com-
+puting a conditioning vectorv and injecting it into hidden
+stateh as GroupNorm(h +v), we compute conditioning
+vectors w and b and inject them into the hidden state as
+GroupNorm(h)(w + 1) +b. We found in preliminary ex-
+periments on ImageNet 64× 64 that these modiﬁcations
+slightly improved FID.
+For ImageNet 64× 64 the architecture we use is described
+as follows. The downsampling stack performs four steps of
+downsampling, each with three residual blocks (He et al.,
+2015). The upsampling stack is setup as a mirror image of
+the downsampling stack. From highest to lowest resolution,
+the UNet stages use [C, 2C, 3C, 4C] channels, respectively.
+In our ImageNet 64× 64 ablations, we set C = 128, but
+we experiment with scaling C in a later section. We esti-
+mate that, withC = 128, our model is comprised of 120M
+parameters and requires roughly 39 billion FLOPs in the
+forward pass.
+For our CIFAR-10 experiments, we use a smaller model with
+three resblocks per downsampling stage and layer widths
+[C, 2C, 2C, 2C] with C = 128 . We swept over dropout
+values{0.1, 0.2, 0.3} and found that 0.1 worked best for
+the linear schedule while 0.3 worked best for our cosine
+schedule. We expand upon this in Section F.
+We use Adam (Kingma & Ba, 2014) for all of our experi-
+ments. For most experiments, we use a batch size of 128,
+a learning rate of 10−4, and an exponential moving aver-
+age (EMA) over model parameters with a rate of 0.9999.
+For our scaling experiments, we vary the learning rate to
+accomodate for different model sizes. For our larger class-
+conditional ImageNet 64× 64 experiments, we scaled up
+the batch size to 2048 for faster training on more GPUs.
+When using the linear noise schedule from Ho et al. (2020),
+we linearly interpolate from β1 = 0.0001/4 to β4000 =
+0.02/4 to preserve the shape of ¯αt for theT = 4000 sched-
+ule.
+When computing FID we produce 50K samples from our
+models, except for unconditional ImageNet 64× 64 where
+we produce 10K samples. Using only 10K samples biases
+4In initial experiments, we found that a ResNet-style architec-
+ture with no downsampling achieved better log-likelihoods but
+worse FIDs than the UNet architecture.
+the FID to be higher, but requires much less compute for
+sampling and helps do large ablations. Since we mainly use
+FID for relative comparisons on unconditional ImageNet
+64×64, this bias is acceptable. For computing the reference
+distribution statistics we follow prior work (Ho et al., 2020;
+Brock et al., 2018) and use the full training set for CIFAR-10
+and ImageNet, and 50K training samples for LSUN. Note
+that unconditional ImageNet 64×64 models are trained and
+evaluated using the ofﬁcial ImageNet-64 dataset (van den
+Oord et al., 2016a), whereas for class conditional ImageNet
+64×64 and 256×256 we center crop and area downsample
+images (Brock et al., 2018).
+B. Fast Sampling on LSUN 256× 256
+Lsimple (σ2
+t = βt, batch=64, lr=2e-5)
+Lsimple (σ2
+t = βt, batch=128, lr=1e-4)
+Lsimple (σ2
+t = ̃βt, batch=64, lr=2e-5)
+Lsimple (σ2
+t = ̃βt, batch=128, lr=1e-4)
+Lsimple (̃̃IM, batch=64, lr=2e-5)
+Lsimple (̃̃IM, batch=128, lr=1e-4)
+Lhybrid (batch=64, lr=2e-5)
+Lhybrid (batch=128, lr=1e-4)
+102 103
+sampling steps
+0.0
+2.5
+5.0
+7.5
+10.0
+12.5
+15.0
+17.5
+20.0FID
+Figure 11. FID vs. number of sampling steps from an LSUN
+256 × 256 bedroom model.
+To test the effectiveness of our Lhybrid models on a high-
+resolution domain, we trained bothLhybrid andLsimple mod-
+els on the LSUN bedroom (Yu et al., 2015) dataset. We
+train two models: one with batch size 64 and learning rate
+2× 10−5 as in Ho et al. (2020), and another with a larger
+batch size 128 and learning rate 10−4. All models were
+trained with 153.6M examples, which is 2.4M training itera-
+tions with batch size 64.
+Our results are displayed in Figure 11. We ﬁnd that DDIM
+outperforms our Lhybrid model when using fewer than 50
+diffusion steps, while ourLhybrid model outperforms DDIM
+with more than 50 diffusion steps. Interestingly, we note
+that DDIM beneﬁts from a smaller learning rate and batch
+size, whereas our method is able to take advantage of a
+larger learning rate and batch size.
+
+
+=== PAGE 12 ===
+Improved Denoising Diffusion Probabilistic Models 12
+C. Sample Quality on ImageNet 256× 256
+We trained two models on class conditional ImageNet
+256× 256. The ﬁrst is a usual diffusion model that directly
+models the 256× 256 images. The second model reduces
+compute by chaining a pretrained 64× 64 modelp(x64|y)
+with another upsampling diffusion modelp(x256|x64,y ) to
+upsample images to 256× 256. For the upsampling model,
+the downsampled imagex64 is passed as extra conditioning
+input to the UNet. This is similar to VQ-V AE-2 (Razavi
+et al., 2019), which uses two stages of priors at different
+latent resolutions to more efﬁciently learn global and local
+features. The linear schedule worked better for 256× 256
+images, so we used that for these results. Table 5 summa-
+rizes our results. For VQ-V AE-2, we use the FIDs reported
+in (Ravuri & Vinyals, 2019). Diffusion models still obtain
+the best FIDs for a likelihood-based model, and close the
+gap to GANs considerably.
+MODEL FID
+VQ-V AE-2 ((Razavi et al., 2019), two-stage) 38.1
+Improved Diffusion (ours, single-stage) 31.5
+Improved Diffusion (ours, two-stage) 12.3
+BigGAN (Brock et al., 2018) 7.7
+BigGAN-deep (Brock et al., 2018) 7.0
+Table 5. Sample quality comparison on class conditional Ima-
+geNet 256 × 256. BigGAN FIDs are reported for the truncation
+that results in the best FID.
+Figure 12. Random samples from two-stage class conditional Im-
+ageNet 256 × 256 model. On top are random samples from the
+64 × 64 model (FID 2.92), whereas on bottom are the results after
+upsampling them to 256 × 256 (FID 12.3). Each model uses 250
+sampling steps.
+
+
+=== PAGE 13 ===
+Improved Denoising Diffusion Probabilistic Models 13
+D. Combining Lhybrid and Lvlb Models
+0 500 1000 1500 2000 2500 3000 3500 4000
+diffusion step (t)
+0.900
+0.925
+0.950
+0.975
+1.000
+1.025
+1.050
+1.075
+1.100
+Lt(θhybrid)/Lt(θvlb)
+Figure 13. The ratio between VLB terms for each diffusion step of
+θhybrid andθvlb. Values less than 1.0 indicate thatθhybrid is ”better”
+thanθvlb for that timestep of the diffusion process.
+Figure 14. Samples fromθvlb andθhybrid, as well as an ensemble
+produced by usingθvlb for the ﬁrst and last 100 diffusion steps. For
+these samples, the seed was ﬁxed, allowing a direct comparison
+between models.
+To understand the trade-off between Lhybrid and Lvlb, we
+show in Figure 13 that the model resulting from Lvlb (re-
+ferred to asθvlb) is better at the start and end of the diffusion
+process, while the model resulting from Lhybrid (referred
+to as θhybrid) is better throughout the middle of the diffu-
+sion process. This suggests that θvlb is focusing more on
+imperceptible details, hence the lower sample quality.
+Given the above observation, we performed an experiment
+on ImageNet 64× 64 to combine the two models by con-
+structing an ensemble that usesθhybrid fort∈ [100,T−100)
+andθvlb elsewhere. We found that this model achieved an
+FID of 19.9 and an NLL of 3.52 bits/dim. This is only
+slightly worse thanθhybrid in terms of FID, while being bet-
+ter than both models in terms of NLL.
+E. Log-likelihood with Fewer Diffusion Steps
+Lsimple (σ2
+t = βt, mid-training)
+Lsimple (σ2
+t = βt, fully trained)
+Lsimple (σ2
+t = ̃βt, mid-training)
+Lsimple (σ2
+t = ̃βt, fully trained)
+Lsimple (̃̃IM, mid-training)
+Lsimple (̃̃IM, fully trained)
+Lhybrid (ours, mid-training)
+Lhybrid (ours, fully trained)
+103
+evaluation steps
+3.6
+3.7
+3.8
+3.9
+4.0
+4.1
+4.2NLL (bits/dim)
+103
+evaluation steps
+3.0
+3.2
+3.4
+3.6
+3.8
+4.0NLL (bits/dim)
+Figure 15. NLL versus number of evaluation steps, for models
+trained on ImageNet 64 × 64 (top) and CIFAR-10 (bottom). All
+models were trained with 4000 diffusion steps.
+Figures 15 plots negative log-likelihood as a function of
+number of sampling steps for both ImageNet 64× 64 and
+CIFAR-10. In initial experiments, we found that although
+constant striding did not signiﬁcantly affect FID, it dras-
+tically reduced log-likelihood. To address this, we use a
+strided subset of timesteps as for FID, but we also include
+everyt from 1 toT/K . This requiresT/K extra evaluation
+steps, but greatly improves log-likelihood compared to the
+uniformly strided schedule. We did not attempt to calculate
+NLL using DDIM, since Song et al. (2020a) does not present
+NLL results or a simple way of estimating likelihood under
+DDIM.
+
+
+=== PAGE 14 ===
+Improved Denoising Diffusion Probabilistic Models 14
+F. Overﬁtting on CIFAR-10
+100 200 300 400 500
+training iters (thousands)
+3
+4
+5
+6
+7
+8
+9FID
+linear
+cosine
+100 200 300 400 500
+training iters (thousands)
+3.10
+3.15
+3.20
+3.25
+3.30
+3.35
+3.40NLL
+linear (test)
+linear (train)
+cosine (test)
+cosine (train)
+Figure 16. FID (top) and NLL (bottom) over the course of training
+for two CIFAR-10 models, both with dropout 0.1. The model
+trained with the linear schedule learns more slowly, but does not
+overﬁt as quickly. When too much overﬁtting occurs, we observed
+overﬁtting artifacts similar to those from Salimans et al. (2017),
+which is reﬂected by increasing FID.
+On CIFAR-10, we noticed that all models overﬁt, but tended
+to reach similar optimal FID at some point during training.
+Holding dropout constant, we found that models trained
+with our cosine schedule tended to reach optimal perfor-
+mance (and then overﬁt) more quickly than those trained
+with the linear schedule (Figure 16). In our experiments, we
+corrected for this difference by using more dropout for our
+cosine models than the linear models. We suspect that the
+overﬁtting from the cosine schedule is either due to 1) less
+noise in the cosine schedule providing less regularization,
+or 2) the cosine schedule making optimization, and thus
+overﬁtting, easier.
+G. Early stopping for FID
+200 400 600 800 1000 1200 1400
+training iters (thousands)
+5
+6
+7
+8
+9
+10FID
+0.0, 0.99
+0.0, 0.999
+0.0, 0.9999
+0.0, 0.99995
+0.0, 0.99999
+0.1, 0.99
+0.1, 0.999
+0.1, 0.9999
+0.1, 0.99995
+0.1, 0.99999
+0.3, 0.99
+0.3, 0.999
+0.3, 0.9999
+0.3, 0.99995
+0.3, 0.99999
+original best
+Figure 17. A sweep of dropout and EMA hyperparameters on
+class conditional ImageNet-64.
+Like on CIFAR-10, we surprisingly observed overﬁtting
+on class-conditional ImageNet 64× 64, despite it being a
+much larger and more diverse dataset. The main observable
+result of this overﬁtting was that FID started becoming
+worse over the course of training. We initially tried a sweep
+(Figure 17) over the EMA hyperparameter to make sure it
+was well tuned, and found that 0.9999 and 0.99995 worked
+best. We then tried runs with dropout 0.1 and 0.3, and
+found that models with a small amount of dropout improved
+the best attainable FID but took longer to get to the same
+performance and still eventually overﬁt. We concluded that
+the best way to train, given what we know, is to early stop
+and instead increase model size if we want to use additional
+training compute.
+H. Samples with Varying Steps and
+Objectives
+Figures 18 through 23 show unconditional ImageNet 64×
+64 samples as we reduce number of sampling steps for
+anLhybrid model with 4K diffusion steps trained for 1.5M
+training iterations.
+Figures 24 through 29 show unconditional CIFAR-10 sam-
+ples as we reduce number of sampling steps for an Lhybrid
+model with 4K diffusion steps trained for 500K training
+iterations.
+Figures 30 and 31 highlight the difference in sample quality
+between models trained withLhybrid andLvlb.
+
+
+=== PAGE 15 ===
+Improved Denoising Diffusion Probabilistic Models 15
+Figure 18. 50 sampling steps on unconditional ImageNet 64 × 64
+Figure 19. 100 sampling steps on unconditional ImageNet 64 × 64
+Figure 20. 200 sampling steps on unconditional ImageNet 64 × 64
+Figure 21. 400 sampling steps on unconditional ImageNet 64 × 64
+Figure 22. 1000 sampling steps on unconditional ImageNet64×64
+Figure 23. 4K sampling steps on unconditional ImageNet 64 × 64.
+
+
+=== PAGE 16 ===
+Improved Denoising Diffusion Probabilistic Models 16
+Figure 24. 50 sampling steps on unconditional CIFAR-10
+Figure 25. 100 sampling steps on unconditional CIFAR-10
+Figure 26. 200 sampling steps on unconditional CIFAR-10
+Figure 27. 400 sampling steps on unconditional CIFAR-10
+Figure 28. 1000 sampling steps on unconditional CIFAR-10
+Figure 29. 4000 sampling steps on unconditional CIFAR-10
+
+
+=== PAGE 17 ===
+Improved Denoising Diffusion Probabilistic Models 17
+Figure 30. Unconditional ImageNet 64 × 64 samples generated
+fromLhybrid (top) andLvlb (bottom) models using the exact same
+random noise. Both models were trained for 1.5M iterations.
+Figure 31. Unconditional CIFAR-10 samples generated from
+Lhybrid (top) andLvlb (bottom) models using the exact same random
+noise. Both models were trained for 500K iterations.
