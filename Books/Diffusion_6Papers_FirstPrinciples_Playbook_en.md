@@ -25,7 +25,7 @@ Diffusion model; sampler; preconditioning; variance/covariance learning; evaluat
 - Readers: Engineering and scientific research readers who do diffusion model training/sampling implementation and system ablation (familiar with basic probability and deep learning training by default).
 - Usage: Read in a closed loop of "Phenomenon-Location-Change-Review"; Chapter 5 (Visualization and Fine-tuning) is used to include the sampling link in the parameter adjustment panel.
 - Citation: `Ref: [P?, p.?]` at the end of each entry title indicates the source; `p.?` corresponds to the page number of the paper PDF (aligned with the `=== PAGE ? ===` tags of `Books/text/*.txt`).
-- Notation: `T` total diffusion steps, `t` time steps, `alpha_bar_t` cumulative noise coefficient, `sigma` continuous noise scale (EDM), `NFE` number of network evaluations during sampling, `FID/NLL` common evaluation indicators.
+- Notation: `T` total diffusion steps, `t` time steps, `ᾱ_t` cumulative noise coefficient, `σ` continuous noise scale (EDM), `NFE` number of network evaluations during sampling, `FID/NLL` common evaluation indicators.
 
 ## Six papers (the only basis for this manual)
 
@@ -94,8 +94,9 @@ Citation format: Write `Ref: [P? p?]` in the title of each entry.
      - Empirical selection of P2: use quadratic for CIFAR-10 and linear for the rest of the data sets (FID is slightly better).
   3) Set randomness `eta` (definition of P2): `eta=0` is deterministic DDIM; `eta=1` corresponds to the original DDPM generation process.
   4) The sampling update formula is implemented according to the closed formula of P2 (each step can be reviewed):
-     - `x_{tau_{i-1}}(eta) = sqrt(alpha_{tau_{i-1}}) * ((x_{tau_i} - sqrt(1-alpha_{tau_i}) * eps_theta(x_{tau_i},tau_i)) / sqrt(alpha_{tau_i})) + sqrt(1-alpha_{tau_{i-1}}-sigma_{tau_i}(eta)^2) * eps_theta(x_{tau_i},tau_i) + sigma_{tau_i}(eta) * eps`
-     - `sigma_{tau_i}(eta) = eta * sqrt((1-alpha_{tau_{i-1}})/(1-alpha_{tau_i})) * sqrt(1 - alpha_{tau_i}/alpha_{tau_{i-1}})`
+     - `A_i = (x_{τ_i} - √(1-α_{τ_i}) * ε_θ(x_{τ_i}, τ_i)) / √(α_{τ_i})`
+     - `x_{τ_{i-1}}(η) = √(α_{τ_{i-1}}) * A_i + √(1-α_{τ_{i-1}}-σ_{τ_i}^2(η)) * ε_θ(x_{τ_i}, τ_i) + σ_{τ_i}(η) * ε`
+     - `σ_{τ_i}(η) = η * √((1-α_{τ_{i-1}})/(1-α_{τ_i})) * √(1 - α_{τ_i}/α_{τ_{i-1}})`
   5) The fixed evaluation protocol compares 10/20/50/100 step output and forms a "less-step acceleration curve" (see 5.1/5.5/5.6).
 - Why this is done: P2 explains that DDIM and DDPM share the same training marginal distribution, but the reverse generation process can choose a family of non-Markov processes; therefore "train once, inference can switch at different speed-quality points".
 - Common problem: Mistaking "slow generation" for insufficient training; or mistakenly thinking that you need to retrain a model with a smaller T to speed up.
@@ -982,8 +983,8 @@ Citation format: Write `Ref: [P? p?]` in the title of each entry.
 - How to do it:
   1) Do few-step sampling, use these two rules to generate τ subsequences, and use fixed x_T for consistency diagnosis (see 5.2).
   Table (P2 τ rules):
-  - Linear: tau_i = floor(c * i)
-  - Quadratic: tau_i = floor(c * i^2)
+  - Linear: `tau_i = floor(c * i)`
+  - Quadratic: `tau_i = floor(c * i^2)`
   - P2 empirical selection: CIFAR-10 is more quadratic, and the remaining data sets are more linear (as a starting point).
 - Why this is done: P2 regards the "sampling time point distribution" as a few-step quality critical degree of freedom.
 - Frequently Asked Questions: Unreasonable τ values ​​cause few-step generation to look more like noise, but there are no obvious abnormalities on the training end.

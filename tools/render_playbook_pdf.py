@@ -44,6 +44,7 @@ EN_LABEL_ALIASES = (
 # Table fonts are resolved at runtime in `build_pdf`.
 TABLE_CELL_FONT = "Helvetica"
 TABLE_HEADER_FONT = "Helvetica-Bold"
+MATH_SPAN_FONT = ""
 
 
 @dataclass
@@ -311,18 +312,18 @@ def _format_math_expr(expr: str) -> str:
 
     # 2) Special patterns that must run before generic underscore->subscript.
     # Keep underscores (no <sub> tags yet) so we can do operator spacing safely.
-    # alpha_bar_t -> ᾱ_t
+    # alpha_bar_t -> αˉ_t (avoid combining-mark rendering artifacts in some fonts)
     s = re.sub(
         r"\balpha_bar_([A-Za-z0-9+-]+)\b",
-        lambda m: "α\u0304_%s" % m.group(1),
+        lambda m: "αˉ_%s" % m.group(1),
         s,
     )
     s = re.sub(
         r"\bα_bar_([A-Za-z0-9+-]+)\b",
-        lambda m: "α\u0304_%s" % m.group(1),
+        lambda m: "αˉ_%s" % m.group(1),
         s,
     )
-    s = re.sub(r"\balpha_bar\b", "α\u0304", s)
+    s = re.sub(r"\balpha_bar\b", "αˉ", s)
     # beta_tilde (paper-style \u02DCbeta_t) and tilde_x
     s = re.sub(r"\bbeta_tilde\b", "β\u0303", s)
     s = re.sub(r"\btilde_([A-Za-z])\b", lambda m: m.group(1) + "\u0303", s)
@@ -333,36 +334,85 @@ def _format_math_expr(expr: str) -> str:
     s = re.sub(r"\s*\*\s*", " * ", s)
     s = re.sub(r"\s*\+\s*", " + ", s)
     s = re.sub(r"\s*⊙\s*", " ⊙ ", s)
-    s = s.replace("-", "−")
     s = s.replace("||", "‖")
 
+    long_formula_mode = len(s) > 120
+
     # 4) Subscripts (ASCII + common Greek symbols).
-    s = s.replace("_theta", "<sub>θ</sub>")
-    # Greek letter (optionally with combining marks) + _t
-    s = re.sub(
-        r"([α-ωΑ-Ω][\u0300-\u036f]?)_([A-Za-z0-9+-]+)\b",
-        lambda m: f"{m.group(1)}<sub>{_xml_escape(m.group(2))}</sub>",
-        s,
-    )
-    s = re.sub(
-        r"\b([A-Za-z]+)_\{([^}]+)\}\b",
-        lambda m: f"{m.group(1)}<sub>{_xml_escape(m.group(2))}</sub>",
-        s,
-    )
-    s = re.sub(
-        r"\b([A-Za-z]+)_([A-Za-z0-9+-]+)\b",
-        lambda m: f"{m.group(1)}<sub>{_xml_escape(m.group(2))}</sub>",
-        s,
-    )
+    def _replace_braced_subscripts(text: str) -> str:
+        """
+        Replace balanced-brace subscripts like `alpha_{tau_{i-1}}` safely.
+        """
+        out: List[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if i + 2 < n and text[i].isalpha():
+                j = i
+                while j < n and (text[j].isalnum() or text[j] == "-"):
+                    j += 1
+                base = text[i:j]
+                if j + 1 < n and text[j:j + 2] == "_{":
+                    k = j + 2
+                    depth = 1
+                    while k < n and depth > 0:
+                        if text[k] == "{":
+                            depth += 1
+                        elif text[k] == "}":
+                            depth -= 1
+                        k += 1
+                    if depth == 0:
+                        inner = text[j + 2 : k - 1]
+                        # Keep one-level subscript only; flatten nested braces for readability.
+                        inner = inner.replace("{", "(").replace("}", ")")
+                        out.append(f"{base}<sub>{inner}</sub>")
+                        i = k
+                        continue
+                out.append(base)
+                i = j
+                continue
+            out.append(text[i])
+            i += 1
+        return "".join(out)
+
+    # Always map _theta to Greek theta in both normal/long formulas.
+    s = s.replace("_theta", "_θ")
+
+    if not long_formula_mode:
+        # Single pass on braced subscripts; avoid nested tiny subscripts.
+        s = _replace_braced_subscripts(s)
+
+        s = s.replace("_θ", "<sub>θ</sub>")
+        # Greek letter (optionally with combining marks) + _t
+        s = re.sub(
+            r"([α-ωΑ-Ω][\u0300-\u036f]?)_([A-Za-z0-9+-]+)\b",
+            lambda m: f"{m.group(1)}<sub>{_xml_escape(m.group(2))}</sub>",
+            s,
+        )
+        s = re.sub(
+            r"\b([A-Za-z]+)_\{([^}]+)\}\b",
+            lambda m: f"{m.group(1)}<sub>{_xml_escape(m.group(2))}</sub>",
+            s,
+        )
+        s = re.sub(
+            r"\b([A-Za-z]+)_([A-Za-z0-9+-]+)\b",
+            lambda m: f"{m.group(1)}<sub>{_xml_escape(m.group(2))}</sub>",
+            s,
+        )
+        s = re.sub(
+            r"αˉ_([A-Za-z0-9+-]+)\b",
+            lambda m: f"αˉ<sub>{_xml_escape(m.group(1))}</sub>",
+            s,
+        )
 
     # 5) Superscripts.
     s = re.sub(r"\^(\d+)", lambda m: f"<super>{_xml_escape(m.group(1))}</super>", s)
 
     # 6) Greek letter names (also match identifiers like sigma<sub>t</sub>).
-    # Use (?=\\b|<) so replacements work before tag boundaries.
+    # Use (?=\\b|<|_) so replacements work before tag boundaries and subscripts.
     def repl(name: str, greek: str) -> None:
         nonlocal s
-        s = re.sub(rf"\b{name}(?=\b|<)", greek, s)
+        s = re.sub(rf"\b{name}(?=\b|<|_)", greek, s)
 
     repl("Sigma", "Σ")
     repl("mu", "μ")
@@ -381,13 +431,15 @@ def _format_math_expr(expr: str) -> str:
     repl("eps", "ε")
     repl("theta", "θ")
 
-    # 7) Non-breaking spaces around separators that should not break lines.
-    nbsp = "\u00A0"
-    s = re.sub(r"\s*\|\s*", f"{nbsp}|{nbsp}", s)
-    s = re.sub(r"\s*=\s*", f"{nbsp}={nbsp}", s)
-    s = re.sub(r"\s*,\s*", f",{nbsp}", s)
+    # 7) Normalize spacing but keep regular break opportunities.
+    s = re.sub(r"\s*\|\s*", " | ", s)
+    s = re.sub(r"\s*=\s*", " = ", s)
+    s = re.sub(r"\s*,\s*", ", ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    s = s.replace(" ", nbsp)
+
+    # For long formulas, stop here to avoid over-formatting artifacts.
+    if long_formula_mode:
+        return s
 
     # 8) Light italics for common scalar/variable letters.
     s = re.sub(r"\b([qpx])\b", r"<i>\1</i>", s)
@@ -400,6 +452,83 @@ def format_cell_text(s: str) -> str:
     - Escapes XML for normal text.
     - Converts inline `...` segments using _format_math_expr().
     """
+    def _format_math_plain(expr: str) -> str:
+        t = expr.strip()
+        # Stable, tag-free math normalization for PDF robustness.
+        t = t.replace("sqrt(", "√(")
+        # Keep math structure explicit but readable in plain-text rendering.
+        t = t.replace("_{", "_(").replace("{", "(").replace("}", ")")
+        t = re.sub(r"\balpha_bar_([A-Za-z0-9+-]+)\b", lambda m: f"αˉ_{m.group(1)}", t)
+        t = re.sub(r"\bα_bar_([A-Za-z0-9+-]+)\b", lambda m: f"αˉ_{m.group(1)}", t)
+        t = re.sub(r"\balpha_bar\b", "αˉ", t)
+        t = t.replace("_theta", "_θ")
+        greek_map = [
+            ("Sigma", "Σ"),
+            ("alpha", "α"),
+            ("beta", "β"),
+            ("sigma", "σ"),
+            ("rho", "ρ"),
+            ("lambda", "λ"),
+            ("lamuda", "λ"),
+            ("eps", "ε"),
+            ("epsilon", "ε"),
+            ("theta", "θ"),
+            ("tau", "τ"),
+            ("mu", "μ"),
+            ("gamma", "γ"),
+            ("varphi", "ϕ"),
+            ("phi", "φ"),
+            ("eta", "η"),
+        ]
+        for src, dst in greek_map:
+            t = re.sub(rf"\b{src}(?=\b|_)", dst, t)
+        t = t.replace("||", "‖")
+        t = re.sub(r"\s+", " ", t).strip()
+        txt = (
+            t.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+        if MATH_SPAN_FONT:
+            return f'<font name="{MATH_SPAN_FONT}">{txt}</font>'
+        return txt
+
+    def _looks_like_math(span: str) -> bool:
+        t = span.strip()
+        if not t:
+            return False
+        # CLI flags / code-like spans should stay as code, not math.
+        if "--" in t:
+            return False
+        greek_name_pattern = r"(?:alpha|beta|sigma|rho|lambda|eps|theta|mu|tau|eta|gamma|varphi|phi)"
+        if re.search(rf"(?i){greek_name_pattern}", t):
+            return True
+        if re.search(r"^[A-Za-z{}]+(?:_[A-Za-z0-9+-]+)+(?:\([^)]*\))?$", t):
+            return True
+        if "/" in t and not any(op in t for op in ("=", "+", "*", "_", "^", "sqrt", "clip", "log")):
+            return False
+        # Heuristics for math-like spans used in this playbook.
+        if any(k in t for k in ("sqrt", "clip", "log10", "||", "⊙", "^", "_{")):
+            return True
+        if re.search(r"\b(alpha|beta|sigma|rho|lambda|eps|theta|mu|tau|gamma|varphi)\b", t):
+            return True
+        if re.search(r"[A-Za-z]+_[A-Za-z0-9]+", t) and any(op in t for op in ("=", "+", "-", "*", "/")):
+            return True
+        if any(op in t for op in ("=", "+", "*")) and re.search(r"[A-Za-z]", t):
+            return True
+        return False
+
+    def _format_code_span(span: str) -> str:
+        esc = (
+            span.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+        # Use body font for robust glyph coverage in mixed content.
+        return esc
+
     parts = s.split("`")
     out: List[str] = []
     for i, part in enumerate(parts):
@@ -408,7 +537,10 @@ def format_cell_text(s: str) -> str:
                 part.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             )
         else:
-            out.append(_format_math_expr(part))
+            if _looks_like_math(part):
+                out.append(_format_math_plain(part))
+            else:
+                out.append(_format_code_span(part))
     txt = "".join(out).strip()
     # Render newlines as hard breaks in the PDF.
     txt = txt.replace("\n", "<br/>")
@@ -583,47 +715,92 @@ def render_cell_flowables(
     return out
 
 
+def split_section_chunks(
+    value: str,
+    *,
+    max_chars: int = 1200,
+    max_lines: int = 24,
+) -> List[str]:
+    """
+    Split a section body into medium chunks so each table row remains splittable across pages.
+    - Keep markdown pipe tables as standalone chunks.
+    - Split long prose blocks by soft boundaries (blank lines preferred).
+    """
+    text = value.strip("\n")
+    if not text.strip():
+        return [""]
+
+    lines = text.splitlines()
+    chunks: List[str] = []
+    buf: List[str] = []
+    buf_chars = 0
+    i = 0
+
+    def flush_buf() -> None:
+        nonlocal buf, buf_chars, chunks
+        if not buf:
+            return
+        chunk = "\n".join(buf).strip("\n")
+        if chunk.strip():
+            chunks.append(chunk)
+        buf = []
+        buf_chars = 0
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Keep markdown table block together.
+        if (
+            stripped.startswith("|")
+            and i + 1 < len(lines)
+            and lines[i + 1].strip().startswith("|")
+            and "-" in lines[i + 1]
+        ):
+            flush_buf()
+            tbl: List[str] = [line]
+            i += 1
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                tbl.append(lines[i])
+                i += 1
+            chunks.append("\n".join(tbl).strip("\n"))
+            continue
+
+        buf.append(line)
+        buf_chars += len(line) + 1
+        needs_split = buf_chars >= max_chars or len(buf) >= max_lines
+        if needs_split:
+            # Prefer split at a recent blank line.
+            split_idx = -1
+            lo = max(0, len(buf) - 6)
+            for j in range(len(buf) - 1, lo - 1, -1):
+                if not buf[j].strip():
+                    split_idx = j
+                    break
+            if 0 <= split_idx < len(buf) - 1:
+                head = buf[: split_idx + 1]
+                tail = buf[split_idx + 1 :]
+                chunk = "\n".join(head).strip("\n")
+                if chunk.strip():
+                    chunks.append(chunk)
+                buf = tail
+                buf_chars = sum(len(x) + 1 for x in buf)
+            else:
+                flush_buf()
+        i += 1
+
+    flush_buf()
+    return chunks or [""]
+
+
 def build_pdf(input_md: str, output_pdf: str) -> None:
     # Prefer embedding an open-source TTF for print-ready output.
     # Fallback to CID font if the font files are missing.
     fonts_dir = os.path.join(os.path.dirname(__file__), "fonts")
-    body_font = "LXGWWenKai-Regular"
-    body_font_boldish = "LXGWWenKai-Medium"
-    title_font = "LXGWWenKai-Medium"
+    body_font = "NotoSansSC-Body-static"
+    body_font_boldish = "NotoSansSC-Bold-static"
+    title_font = "NotoSansSC-Bold-static"
     fallback_cid = "STSong-Light"
-
-    try:
-        pdfmetrics.registerFont(
-            TTFont(body_font, os.path.join(fonts_dir, "LXGWWenKai-Regular.ttf"))
-        )
-        pdfmetrics.registerFont(
-            TTFont(body_font_boldish, os.path.join(fonts_dir, "LXGWWenKai-Medium.ttf"))
-        )
-        pdfmetrics.registerFont(
-            TTFont(title_font, os.path.join(fonts_dir, "LXGWWenKai-Medium.ttf"))
-        )
-        # Ensure ReportLab has a sensible family mapping; reduces surprises in helper flowables.
-        addMapping("LXGWWenKai", 0, 0, body_font)
-        addMapping("LXGWWenKai", 0, 1, body_font_boldish)
-        addMapping("LXGWWenKai", 1, 0, body_font_boldish)
-        addMapping("LXGWWenKai", 1, 1, body_font_boldish)
-        running_font = body_font
-    except Exception:
-        pdfmetrics.registerFont(UnicodeCIDFont(fallback_cid))
-        body_font = fallback_cid
-        body_font_boldish = fallback_cid
-        title_font = fallback_cid
-        running_font = fallback_cid
-
-    # Resolve fonts for markdown pipe tables. Use a family name for TT fonts
-    # so Paragraph parser can map bold/italic safely via addMapping().
-    global TABLE_CELL_FONT, TABLE_HEADER_FONT
-    if running_font == fallback_cid:
-        TABLE_CELL_FONT = fallback_cid
-        TABLE_HEADER_FONT = fallback_cid
-    else:
-        TABLE_CELL_FONT = "LXGWWenKai"
-        TABLE_HEADER_FONT = "LXGWWenKai"
 
     with open(input_md, "r", encoding="utf-8") as f:
         md = f.read()
@@ -634,6 +811,70 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
         or input_name.endswith("-en.md")
         or bool(re.search(r"^\s*##\s+Abstract\s*$", md, flags=re.MULTILINE))
     )
+
+    try:
+        # Google Noto Latin.
+        pdfmetrics.registerFont(
+            TTFont("NotoSans-Regular", os.path.join(fonts_dir, "NotoSans-Regular.ttf"))
+        )
+        pdfmetrics.registerFont(
+            TTFont("NotoSans-Bold", os.path.join(fonts_dir, "NotoSans-Bold.ttf"))
+        )
+        # Google Noto SC static instances.
+        pdfmetrics.registerFont(
+            TTFont("NotoSansSC-Body-static", os.path.join(fonts_dir, "NotoSansSC-Body-static.ttf"))
+        )
+        pdfmetrics.registerFont(
+            TTFont("NotoSansSC-Bold-static", os.path.join(fonts_dir, "NotoSansSC-Bold-static.ttf"))
+        )
+
+        # Choose families by document language.
+        if is_english_doc:
+            body_font = "NotoSans-Regular"
+            body_font_boldish = "NotoSans-Bold"
+            title_font = "NotoSans-Bold"
+        else:
+            body_font = "NotoSansSC-Body-static"
+            body_font_boldish = "NotoSansSC-Bold-static"
+            title_font = "NotoSansSC-Bold-static"
+
+        # Ensure ReportLab has sensible family mappings.
+        addMapping("NotoSansSC", 0, 0, "NotoSansSC-Body-static")
+        addMapping("NotoSansSC", 0, 1, "NotoSansSC-Bold-static")
+        addMapping("NotoSansSC", 1, 0, "NotoSansSC-Bold-static")
+        addMapping("NotoSansSC", 1, 1, "NotoSansSC-Bold-static")
+        addMapping("NotoSans", 0, 0, "NotoSans-Regular")
+        addMapping("NotoSans", 0, 1, "NotoSans-Bold")
+        addMapping("NotoSans", 1, 0, "NotoSans-Bold")
+        addMapping("NotoSans", 1, 1, "NotoSans-Bold")
+        running_font = body_font
+    except Exception:
+        pdfmetrics.registerFont(UnicodeCIDFont(fallback_cid))
+        body_font = fallback_cid
+        body_font_boldish = fallback_cid
+        title_font = fallback_cid
+        running_font = fallback_cid
+
+    # Resolve fonts for markdown pipe tables. Use a family name for TT fonts
+    # so Paragraph parser can map bold/italic safely via addMapping().
+    global TABLE_CELL_FONT, TABLE_HEADER_FONT, MATH_SPAN_FONT
+    if running_font == fallback_cid:
+        TABLE_CELL_FONT = fallback_cid
+        TABLE_HEADER_FONT = fallback_cid
+    else:
+        TABLE_CELL_FONT = body_font
+        TABLE_HEADER_FONT = body_font_boldish
+
+    # Dedicated font for math spans to ensure Greek glyph coverage.
+    MATH_SPAN_FONT = ""
+    try:
+        math_font_path = os.path.join(fonts_dir, "NotoSans-Regular.ttf")
+        if os.path.exists(math_font_path):
+            pdfmetrics.registerFont(TTFont("PB-Math-Unicode", math_font_path))
+            MATH_SPAN_FONT = "PB-Math-Unicode"
+    except Exception:
+        MATH_SPAN_FONT = ""
+
     section_labels = EN_LABELS if is_english_doc else ZH_LABELS
     toc_title = "Contents" if is_english_doc else "目录"
     ref_prefix = "Ref" if is_english_doc else "引文"
@@ -661,34 +902,36 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
         "PBBase",
         parent=styles["BodyText"],
         fontName=body_font,
-        fontSize=10.5,
-        leading=15,
-        spaceAfter=4,
+        fontSize=10.6,
+        leading=15.4,
+        spaceAfter=4.2,
+        textColor=colors.HexColor("#1F1F1F"),
         wordWrap="CJK",
     )
     small = ParagraphStyle(
         "PBSmall",
         parent=base,
-        fontSize=9.5,
-        leading=13,
-        textColor=colors.HexColor("#333333"),
+        fontSize=9.6,
+        leading=13.8,
+        textColor=colors.HexColor("#2A2A2A"),
     )
     h1 = ParagraphStyle(
         "PBTitle",
         parent=base,
         fontName=title_font,
-        fontSize=22,
-        leading=28,
-        spaceAfter=10,
+        fontSize=23,
+        leading=29,
+        spaceAfter=12,
+        textColor=colors.HexColor("#1A1A1A"),
     )
     h2 = ParagraphStyle(
         "PBHeading2",
         parent=base,
         fontName=body_font_boldish,
-        fontSize=14,
-        leading=18,
-        spaceBefore=12,
-        spaceAfter=8,
+        fontSize=14.2,
+        leading=18.8,
+        spaceBefore=11,
+        spaceAfter=7.2,
         textColor=colors.HexColor("#0B3D2E"),
         keepWithNext=True,
     )
@@ -696,19 +939,19 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
         "PBHeading3",
         parent=base,
         fontName=body_font_boldish,
-        fontSize=11.5,
-        leading=16,
-        spaceBefore=8,
-        spaceAfter=6,
-        textColor=colors.HexColor("#111111"),
+        fontSize=11.8,
+        leading=16.4,
+        spaceBefore=7.5,
+        spaceAfter=5.2,
+        textColor=colors.HexColor("#202020"),
         keepWithNext=True,
     )
     meta = ParagraphStyle(
         "PBMeta",
         parent=small,
-        fontSize=9,
-        leading=12,
-        textColor=colors.HexColor("#555555"),
+        fontSize=8.9,
+        leading=12.0,
+        textColor=colors.HexColor("#595959"),
         spaceAfter=2,
     )
 
@@ -717,10 +960,10 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
         running_font=running_font,
         running_font_bold=body_font_boldish,
         pagesize=A4,
-        leftMargin=18 * mm,
-        rightMargin=18 * mm,
-        topMargin=16 * mm,
-        bottomMargin=16 * mm,
+        leftMargin=18.5 * mm,
+        rightMargin=18.5 * mm,
+        topMargin=16.5 * mm,
+        bottomMargin=16.5 * mm,
         title=title,
         author=author_name,
         cover_tagline=cover_tagline,
@@ -786,7 +1029,7 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
             if it.source:
                 block.append(Paragraph(f"{ref_prefix}: {it.source}", meta))
 
-            label_col_w = 26 * mm
+            label_col_w = (33 * mm) if is_english_doc else (27 * mm)
             detail_col_w = doc.width - label_col_w
             item_sections: List[Tuple[str, str]] = []
             for idx, label in enumerate(section_labels):
@@ -807,55 +1050,48 @@ def build_pdf(input_md: str, output_pdf: str) -> None:
                                 break
                 item_sections.append((label, value))
 
-            # ReportLab cannot split a single table row across pages; switch to
-            # stacked section layout for long content blocks to avoid LayoutError.
-            long_content = any(len(v) > 1200 for _, v in item_sections)
             label_style = ParagraphStyle(
                 "PBLabel",
                 parent=small,
-                fontSize=9.5,
-                leading=12,
+                fontSize=9.6,
+                leading=12.6,
                 textColor=colors.HexColor("#0B3D2E"),
             )
-            if long_content:
-                for label, value in item_sections:
-                    block.append(Paragraph(label, label_style))
-                    if value:
-                        block.extend(render_cell_flowables(value, base, max_table_w=doc.width - 8))
-                    else:
-                        block.append(Paragraph(" ", base))
-                    block.append(Spacer(1, 1.8 * mm))
-            else:
-                rows = []
-                for label, value in item_sections:
+            rows = []
+            for label, value in item_sections:
+                chunks = split_section_chunks(value) if value else [""]
+                for chunk in chunks:
                     rows.append(
                         [
                             Paragraph(label, label_style),
-                            render_cell_flowables(value, base, max_table_w=detail_col_w - 14)
-                            if value
+                            render_cell_flowables(chunk, base, max_table_w=detail_col_w - 14)
+                            if chunk.strip()
                             else [Paragraph(" ", base)],
                         ]
                     )
-                table = Table(
-                    rows,
-                    colWidths=[label_col_w, detail_col_w],
-                    hAlign="LEFT",
+
+            table = Table(
+                rows,
+                colWidths=[label_col_w, detail_col_w],
+                hAlign="LEFT",
+                splitByRow=1,
+            )
+            table.setStyle(
+                TableStyle(
+                    [
+                        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                        ("INNERGRID", (0, 0), (-1, -1), 0.30, colors.HexColor("#E2E6E4")),
+                        ("BOX", (0, 0), (-1, -1), 0.66, colors.HexColor("#C0C8C4")),
+                        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#EEF5F1")),
+                        ("ROWBACKGROUNDS", (1, 0), (1, -1), [colors.white, colors.HexColor("#FAFCFB")]),
+                        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                        ("TOPPADDING", (0, 0), (-1, -1), 4.8),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 4.8),
+                    ]
                 )
-                table.setStyle(
-                    TableStyle(
-                        [
-                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                            ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#E0E0E0")),
-                            ("BOX", (0, 0), (-1, -1), 0.7, colors.HexColor("#C6C6C6")),
-                            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F3F7F5")),
-                            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                            ("TOPPADDING", (0, 0), (-1, -1), 5),
-                            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                        ]
-                    )
-                )
-                block.append(table)
+            )
+            block.append(table)
             block.append(Spacer(1, 5 * mm))
             story.extend(block)
 
